@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PRIVATE: Clipboard and File Lines Counter</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            overflow: auto;
+            margin: 0;
+            font-size: 18px;
+            background-color: #000;
+            color: #fff;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1 {
+            margin-bottom: 20px;
+            font-size: 32px;
+            text-align: center;
+        }
+        .container {
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 18px;
+            margin: 10px 5px;
+            background-color: #333;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: calc(50% - 20px);
+            box-sizing: border-box;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #555;
+        }
+        button:active {
+            background-color: #777;
+        }
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+        #lineCount, #timeSpent, #fileSize {
+            margin-top: 20px;
+            font-weight: bold;
+            font-size: 20px;
+        }
+        #fileName {
+            margin-top: 5px;
+            font-size: 18px;
+            font-weight: bold;
+            word-break: break-word;
+        }
+
+        @media (max-width: 768px) {
+            button {
+                width: 100%;
+                margin: 10px 0;
+            }
+            #lineCount, #timeSpent, #fileSize, #fileName {
+                font-size: 18px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 10px;
+                font-size: 16px;
+            }
+            button {
+                padding: 14px 0;
+                font-size: 16px;
+            }
+            #lineCount, #timeSpent, #fileSize {
+                font-size: 18px;
+            }
+            #fileName {
+                font-size: 16px;
+            }
+        }
+
+        button:focus {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Counter Lines</h1>
+    <div class="container">
+        <div>Lines loaded: <span id="lineCount">0</span></div>
+        <div>Time spent: <span id="timeSpent">0.0</span> sec</div>
+        <div>File name: <span id="fileName">None</span></div>
+        <div>File size: <span id="fileSize">0</span></div>
+        <div style="display: flex; justify-content: center; flex-wrap: wrap;">
+            <button id="uploadClipboardButton" aria-label="Upload lines count from clipboard">Upload from Clipboard</button>
+            <button id="uploadFileButton" aria-label="Upload lines count from file">Upload from File</button>
+        </div>
+        <input type="file" id="fileInput" style="display: none;">
+    </div>
+
+    <script>
+        let timerInterval;
+        let startTime;
+
+        function formatNumber(num) {
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+        }
+
+        function formatSize(bytes) {
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            if (bytes === 0) return '0 Bytes';
+            const i = Math.floor(Math.log(bytes) / Math.log(1024));
+            return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function toggleUIBlock(isBlocked) {
+            const buttons = document.querySelectorAll('button');
+            buttons.forEach(button => button.disabled = isBlocked);
+            document.body.style.cursor = isBlocked ? 'wait' : 'default';
+        }
+
+        function startTimer() {
+            startTime = performance.now();
+            document.getElementById('timeSpent').innerText = '0.0';
+            timerInterval = setInterval(() => {
+                const currentTime = performance.now();
+                const timeSpent = ((currentTime - startTime) / 1000).toFixed(1);
+                document.getElementById('timeSpent').innerText = timeSpent;
+            }, 100);
+        }
+
+        function stopTimer() {
+            clearInterval(timerInterval);
+        }
+
+        async function countLinesFromFile(file) {
+            const CHUNK_SIZE = 1024 * 1024 * 32;
+            const numChunks = Math.ceil(file.size / CHUNK_SIZE);
+            let totalLines = 0;
+            let chunkIndex = 0;
+
+            const results = [];
+
+            function createWorker() {
+                return new Promise((resolve) => {
+                    const worker = new Worker('worker.js');
+                    
+                    function handleMessage(e) {
+                        totalLines += e.data.linesCount;
+                        if (chunkIndex < numChunks) {
+                            const nextChunk = file.slice(chunkIndex * CHUNK_SIZE, (chunkIndex + 1) * CHUNK_SIZE);
+                            chunkIndex++;
+                            worker.postMessage({ chunk: nextChunk, index: chunkIndex });
+                        } else {
+                            worker.terminate();
+                            resolve();
+                        }
+                    }
+
+                    worker.onmessage = handleMessage;
+
+                    const firstChunk = file.slice(chunkIndex * CHUNK_SIZE, (chunkIndex + 1) * CHUNK_SIZE);
+                    chunkIndex++;
+                    worker.postMessage({ chunk: firstChunk, index: chunkIndex });
+                });
+            }
+
+            for (let i = 0; i < navigator.hardwareConcurrency * 2; i++) {
+                if (chunkIndex < numChunks) {
+                    results.push(createWorker());
+                }
+            }
+
+            await Promise.all(results);
+
+            return totalLines;
+        }
+
+        document.getElementById('uploadClipboardButton').addEventListener('click', async () => {
+            try {
+                toggleUIBlock(true);
+                document.getElementById('lineCount').innerText = 'loading...';
+                document.getElementById('fileName').innerText = 'Clipboard';
+                document.getElementById('fileSize').innerText = 'Calculating...';
+                startTimer();
+
+                const text = await navigator.clipboard.readText();
+                if (!text) {
+                    alert('Clipboard is empty or does not contain text!');
+                    document.getElementById('lineCount').innerText = '0';
+                    document.getElementById('fileSize').innerText = '0 Bytes';
+                    stopTimer();
+                    return;
+                }
+
+                const encoder = new TextEncoder();
+                const textBytes = encoder.encode(text).length;
+                document.getElementById('fileSize').innerText = formatSize(textBytes);
+
+                const lineCount = (text.match(/\r\n|\r|\n/g) || []).length + 1;
+
+                stopTimer();
+
+                document.getElementById('lineCount').innerText = formatNumber(lineCount);
+            } catch (err) {
+                console.error('Failed to read clipboard contents: ', err);
+                alert('Error reading clipboard contents.');
+                document.getElementById('lineCount').innerText = '0';
+                document.getElementById('fileSize').innerText = '0 Bytes';
+                stopTimer();
+            } finally {
+                toggleUIBlock(false);
+            }
+        });
+
+        document.getElementById('uploadFileButton').addEventListener('click', () => {
+            document.getElementById('fileInput').value = '';
+            document.getElementById('fileInput').click();
+        });
+
+        document.getElementById('fileInput').addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) {
+                document.getElementById('lineCount').innerText = '0';
+                document.getElementById('timeSpent').innerText = '0.0';
+                document.getElementById('fileName').innerText = 'None';
+                document.getElementById('fileSize').innerText = '0 Bytes';
+                toggleUIBlock(false);
+                return;
+            }
+
+            try {
+                toggleUIBlock(true);
+                document.getElementById('lineCount').innerText = `loading using ${navigator.hardwareConcurrency * 2} workers... `;
+                document.getElementById('fileName').innerText = file.name;
+                document.getElementById('fileSize').innerText = formatSize(file.size);
+                startTimer();
+
+                const lineCount = await countLinesFromFile(file);
+
+                stopTimer();
+
+                document.getElementById('lineCount').innerText = formatNumber(lineCount);
+            } catch (err) {
+                console.error('Failed to read file: ', err);
+                alert('Error reading the file.');
+                document.getElementById('lineCount').innerText = '0';
+                document.getElementById('fileSize').innerText = '0 Bytes';
+                stopTimer();
+            } finally {
+                toggleUIBlock(false);
+            }
+        });
+    </script>
+
+</body>
+</html>
